@@ -12,12 +12,15 @@ Your tracking file is: `{{TASKS_FILE}}`
     `{{SCRIPTS_PATH}}/get_next_task.sh --agent {{AGENT_NAME}} --role reviewer --file {{TASKS_FILE}}`
 
 2.  **CHECK OUTPUT**:
-    - If output is "WAIT" or "NO_TASK", or indicates the system is paused:
-      - **Action**: Wait 10 seconds.
-      - **Action**: Repeat Step 1.
-    - If output contains "TASK_FOUND":
-      - The script will provide the `Task ID`, `Context File Path`, and `Instructions`.
-      - **Action**: Proceed to Step 3.
+    The script returns different response types. Handle each accordingly:
+    
+    | Response Code | Meaning | Action |
+    |---|---|---|
+    | `TASK_FOUND` | A task is ready for review | Proceed to Step 3 |
+    | `ALL_DONE` | All tasks are complete | **STOP polling. You are finished!** |
+    | `PAUSED` | System is paused | Wait 1 minute, then repeat Step 1 |
+    | `NO_REVIEWS` | No tasks awaiting review | Wait 1 minute, then repeat Step 1 |
+    | `WAIT` | Temporary hold | Wait 1 minute, then repeat Step 1 |
 
 3.  **REVIEW**:
     - **Work**: 

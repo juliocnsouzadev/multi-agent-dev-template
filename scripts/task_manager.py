@@ -57,7 +57,7 @@ def release_lock(lock_fd):
     lock_fd.close()
 
 def get_next_task(args):
-    """Finds and returns the next task for the agent."""
+    """Finds and returns the next task for the agent with smart responses."""
     file_path = args.file
     agent_name = args.agent
     role = args.role
@@ -65,6 +65,10 @@ def get_next_task(args):
     lock_fd = acquire_lock(file_path)
     try:
         rows = read_tsv(file_path)
+        
+        if not rows:
+            print("NO_TASKS_EXIST: The task file is empty. Wait for the Planner to generate tasks.")
+            return
         
         # Helper to check dependency
         def is_dependency_met(dep_id, all_rows):
@@ -74,62 +78,118 @@ def get_next_task(args):
                 if r['task_id'] == dep_id:
                     return r['status'] == STATUS_DONE
             return False
-
-        # 1. Global Pause Check
-        # If ANY task is paused, we assume the system is paused (or we check the specific task)
-        # The plan says "Check action_state: If 'paused', STOP".
-        # We will check if the candidate task is paused.
+        
+        def get_blocking_task(dep_id, all_rows):
+            """Returns info about the blocking task."""
+            for r in all_rows:
+                if r['task_id'] == dep_id:
+                    return r
+            return None
 
         candidate_task = None
+        my_tasks = []
+        blocked_tasks = []
+        paused_detected = False
+        feedback_tasks = []
 
         if role == 'executor':
-            # Priority: In Progress -> Address Feedback -> To Do
-            # Actually, per plan: 
-            # 1. assigned_agent == ME
-            # 2. status IN [to_do, address_review_feedback]
-            # 3. action_state == active
-            # 4. dependency met
-            
-            # First, check if I already have something in progress (optional safety)
-            # For now, let's just look for the next available.
-            
+            # Collect all tasks assigned to this agent
             for row in rows:
                 if row['assigned_agent'] != agent_name:
                     continue
+                my_tasks.append(row)
                 
+                # Check for pause
                 if row['action_state'] == ACTION_PAUSED:
-                    # If my tasks are paused, I stop.
-                    print("WAIT: System is paused.")
-                    return
-
+                    paused_detected = True
+                
+                # Check for feedback tasks
+                if row['status'] == STATUS_FEEDBACK:
+                    feedback_tasks.append(row)
+            
+            # If paused, respond immediately
+            if paused_detected:
+                print("PAUSED: System is paused. Wait 1 minute before polling again.")
+                return
+            
+            # Now find a candidate
+            for row in my_tasks:
                 if row['status'] in [STATUS_TODO, STATUS_FEEDBACK]:
                     if is_dependency_met(row['dependency_task'], rows):
                         candidate_task = row
                         break
+                    else:
+                        blocked_tasks.append(row)
         
         elif role == 'reviewer':
-            # Reviewer looks for 'in_review'
+            # Reviewer looks for 'in_review' tasks (any, not assigned)
             for row in rows:
-                if row['status'] == STATUS_IN_REVIEW:
-                    if row['action_state'] == ACTION_PAUSED:
-                        print("WAIT: System is paused.")
-                        return
+                if row['action_state'] == ACTION_PAUSED:
+                    paused_detected = True
                     
-                    # Optional: Reviewer preference? For now, FIFO.
-                    candidate_task = row
-                    break
+                if row['status'] == STATUS_IN_REVIEW:
+                    if row['action_state'] != ACTION_PAUSED:
+                        candidate_task = row
+                        break
+            
+            if paused_detected and not candidate_task:
+                print("PAUSED: System is paused. Wait 1 minute before polling again.")
+                return
 
+        # --- Output Decision ---
         if candidate_task:
-            # Output format designed for the Agent to parse easily
+            # Check if it's a feedback task
+            is_feedback = candidate_task['status'] == STATUS_FEEDBACK
+            
             print("TASK_FOUND")
             print(f"TASK_ID: {candidate_task['task_id']}")
             print(f"STATUS: {candidate_task['status']}")
             print(f"CONTEXT_FILE: {candidate_task['context_file']}")
             print(f"DESCRIPTION: {candidate_task['description']}")
+            
+            if is_feedback:
+                print("-" * 20)
+                print("⚠️  ATTENTION: This task has review feedback that needs to be addressed.")
+                print("Read the feedback comments in the context file before making changes.")
+            
             print("-" * 20)
             print(f"INSTRUCTION: To start, run: ./scripts/task_manager.py update-status --file {file_path} --task-id {candidate_task['task_id']} --status in_progress")
-        else:
-            print("NO_TASK: No available tasks found.")
+        
+        elif role == 'executor':
+            # No candidate found - determine why
+            all_done = all(t['status'] == STATUS_DONE for t in my_tasks) if my_tasks else False
+            
+            if not my_tasks:
+                print("NO_ASSIGNMENT: No tasks are assigned to you. Wait for the Planner to assign tasks or check your agent name.")
+            elif all_done:
+                print("ALL_DONE: 🎉 All your assigned tasks are complete! You can stop polling.")
+            elif blocked_tasks:
+                blocker = blocked_tasks[0]
+                blocking_task = get_blocking_task(blocker['dependency_task'], rows)
+                if blocking_task:
+                    print(f"BLOCKED: Task [{blocker['task_id']}] is waiting on [{blocking_task['task_id']}] (status: {blocking_task['status']}, assigned to: {blocking_task['assigned_agent']}).")
+                else:
+                    print(f"BLOCKED: Task [{blocker['task_id']}] is waiting on dependency [{blocker['dependency_task']}].")
+                print("Wait 1 minute before polling again.")
+            else:
+                # Edge case: tasks exist but in other states (e.g., in_progress, in_review)
+                in_progress = [t for t in my_tasks if t['status'] == STATUS_IN_PROGRESS]
+                if in_progress:
+                    print(f"IN_PROGRESS: You have task [{in_progress[0]['task_id']}] still in progress. Complete it before fetching a new one.")
+                else:
+                    print("WAIT: No actionable tasks at this moment. Wait 1 minute before polling again.")
+        
+        elif role == 'reviewer':
+            # No tasks in_review
+            in_review_count = sum(1 for r in rows if r['status'] == STATUS_IN_REVIEW)
+            if in_review_count == 0:
+                all_done = all(r['status'] == STATUS_DONE for r in rows)
+                if all_done:
+                    print("ALL_DONE: 🎉 All tasks are complete! You can stop polling.")
+                else:
+                    print("NO_REVIEWS: No tasks are currently awaiting review. Wait 1 minute before polling again.")
+            else:
+                print("WAIT: Reviews exist but may be paused. Wait 1 minute before polling again.")
 
     finally:
         release_lock(lock_fd)

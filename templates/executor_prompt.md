@@ -12,12 +12,19 @@ Your tracking file is: `{{TASKS_FILE}}`
     `{{SCRIPTS_PATH}}/get_next_task.sh --agent {{AGENT_NAME}} --role executor --file {{TASKS_FILE}}`
 
 2.  **CHECK OUTPUT**:
-    - If output is "WAIT" or "NO_TASK", or indicates the system is paused:
-      - **Action**: Wait 10 seconds.
-      - **Action**: Repeat Step 1.
-    - If output contains "TASK_FOUND":
-      - The script will provide the `Task ID`, `Context File Path`, and `Instructions`.
-      - **Action**: Proceed to Step 3.
+    The script returns different response types. Handle each accordingly:
+    
+    | Response Code | Meaning | Action |
+    |---|---|---|
+    | `TASK_FOUND` | A task is ready for you | Proceed to Step 3 |
+    | `ALL_DONE` | All your tasks are complete | **STOP polling. You are finished!** |
+    | `PAUSED` | System is paused | Wait 1 minute, then repeat Step 1 |
+    | `BLOCKED` | Your next task depends on another | Wait 1 minute, then repeat Step 1 |
+    | `IN_PROGRESS` | You have an unfinished task | Complete it first, then repeat Step 1 |
+    | `NO_ASSIGNMENT` | No tasks assigned to you | Wait for Planner or verify agent name |
+    | `WAIT` | Temporary hold | Wait 1 minute, then repeat Step 1 |
+    
+    **⚠️ Feedback Tasks**: If the output mentions "review feedback", pay special attention to the feedback comments in the context file before making changes.
 
 3.  **EXECUTE**:
     - **Acknowledge**: Run `{{SCRIPTS_PATH}}/update_task_status.sh {TASK_ID} in_progress --file {{TASKS_FILE}}`
